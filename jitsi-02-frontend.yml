@@ -1,0 +1,126 @@
+- name: Jitsi-Meet Frontend
+  gather_facts: true
+  hosts: jitsifrontend
+  become: true
+  become_user: root
+  become_method: sudo
+  tasks:
+  - name: Set debconf-answers for jitsi-meet
+    debconf:
+      name: "{{ item.name }}"
+      question: "{{ item.question }}"
+      value: "{{ item.value }}"
+      vtype: "{{ item.vtype }}"
+    loop:
+      - { name: 'jitsi-meet', question: 'jitsi-videobridge/jvb-hostname', value: '{{ ansible_hostname }}', vtype: 'string' }
+      - { name: 'jitsi-meet', question: 'jitsi-meet/cert-choice', value: 'I want to use my own certificate', vtype: 'string' }
+      - { name: 'jitsi-meet', question: 'jitsi-meet/cert-path-key', value: '/etc/ssl/{{ ansible_hostname }}.key', vtype: 'string' }
+      - { name: 'jitsi-meet', question: 'jitsi-meet/cert-path-crt', value: '/etc/ssl/{{ ansible_hostname }}.crt', vtype: 'string' }
+  - name: Install jitsi-meet
+    package:
+      name:
+        - jitsi-meet
+      state: latest
+  - name: Add all videobridges to prosody
+    lineinfile:
+      path: /etc/prosody/conf.d/{{ ansible_hostname }}.cfg.lua
+      insertafter: '^        authentication = "anonymous"'
+      line: "        {{ allServerString }}"
+  - name: Edit line for XMMP-API and REST-API
+    lineinfile:
+      path: /etc/jitsi/videobridge/config
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+    loop:
+      - { regexp: '^JVB_OPTS', line: 'JVB_OPTS="--apis=rest,xmmp --subdomain={{ ansible_hostname }}"' }
+    notify:
+      - restart videobridge
+  #requires variable videobridgepassword to be defined
+  - name: Set Videobridge Password
+    lineinfile:
+      path: /var/lib/prosody/auth%2e{{ ansible_hostname | regex_replace('-','%2d') }}/accounts/jvb.dat
+      regexp: "password"
+      line: '        ["password"] = "{{ videobridgepassword }}";'
+    when: videobridgepassword is defined
+  - name: Add line for component_ports and component_interface
+    blockinfile:
+      path: /etc/prosody/prosody.cfg.lua
+      insertafter: '^admins ='
+      marker: "-- {mark} ANSIBLE MANAGED BLOCK --"
+      block: |
+        component_ports = {5347}
+        component_interface = "0.0.0.0"
+  - name: Add line for JICOFO_HOST
+    lineinfile:
+      path: /etc/jitsi/jicofo/config
+      regexp: "^JICOFO_HOST="
+      line: JICOFO_HOST="{{ ansible_hostname }}"
+  - name: Copy SSL Certificate
+    copy:
+      src: "files/certs/{{ ansible_hostname }}.cert.pem"
+      dest: "/etc/ssl/{{ ansible_hostname }}.crt"
+      owner: root
+      group: root
+      mode: "0644"
+    notify:
+      - restart nginx
+  - name: Copy SSL private keys
+    copy:
+      src: "files/certs/{{ ansible_hostname }}.key.pem"
+      dest: "/etc/ssl/{{ ansible_hostname }}.key"
+      owner: root
+      group: root
+      mode: "0600"
+    notify:
+      - restart nginx
+  - name: Add Line for JVB_HOST and JVB_HOSTNAME
+    lineinfile:
+      path: /etc/jitsi/videobridge/config
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+    loop:
+      - { regexp: '^JVB_HOSTNAME=', line: 'JVB_HOSTNAME="{{ ansible_hostname }}"' }
+      - { regexp: '^JVB_HOST=', line: 'JVB_HOST="{{ ansible_hostname }}"' }
+    notify:
+      - restart videobridge
+  - name: enable octo
+    lineinfile:
+      path: /etc/jitsi/jicofo/sip-communicator.properties
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+    loop:
+    # IntraRegionBridgeSelectionStrategy
+    # RegionBasedBridgeSelectionStrategy
+    # SingleBridgeSelectionStrategy
+    # SplitBridgeSelectionStrategy
+      - { regexp: '^org.jitsi.jicofo.BridgeSelector.BRIDGE_SELECTION_STRATEGY', line: 'org.jitsi.jicofo.BridgeSelector.BRIDGE_SELECTION_STRATEGY=IntraRegionBridgeSelectionStrategy' }
+    notify:
+      - restart jicofo
+  - name: enable octo in client-config
+    blockinfile:
+      path: /etc/jitsi/meet/{{ ansible_hostname }}-config.js
+      insertafter: "    testing: {"
+      marker: "// {mark} ANSIBLE MANAGED BLOCK"
+      block: |
+        octo: {
+            probability: 1
+        },
+    notify:
+      - restart videobridge
+  handlers:
+    - name: restart nginx
+      service: 
+        name: nginx
+        state: restarted
+    - name: restart videobridge
+      service: 
+        name: jitsi-videobridge2
+        state: restarted
+    - name: restart jicofo
+      service: 
+        name: jicofo
+        state: restarted
+    - name: restart prosody
+      service: 
+        name: prosody
+        state: restarted
